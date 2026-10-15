@@ -19,6 +19,7 @@ class Detector:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.class_names = list(COCO_CLASSES)
         num_classes = 80
+        anchors = None
         checkpoint = None
         if self.weights_path.suffix.lower() in {".pt", ".pth"}:
             checkpoint = torch.load(self.weights_path, map_location="cpu", weights_only=False)
@@ -28,7 +29,11 @@ class Detector:
                 num_classes = len(self.class_names)
             elif isinstance(checkpoint, dict) and "num_classes" in checkpoint:
                 num_classes = int(checkpoint["num_classes"])
-        self.model = YOLOv3(num_classes=num_classes).to(self.device)
+            if isinstance(checkpoint, dict) and checkpoint.get("anchors"):
+                anchors = checkpoint["anchors"]
+        # Every detection runs this module. A weight file only fills parameters.
+        self.model = YOLOv3(num_classes=num_classes, anchors=anchors).to(self.device)
+        self.origin = "trained" if anchors is not None else "darknet"
         if checkpoint is None:
             load_model_weights(self.model, self.weights_path)
         else:

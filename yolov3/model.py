@@ -126,12 +126,21 @@ class ConvSet(nn.Module):
         return x
 
 
+def normalize_anchors(anchors) -> tuple[tuple[float, float], ...]:
+    if anchors is None:
+        return ANCHORS
+    pairs = tuple((float(width), float(height)) for width, height in anchors)
+    if len(pairs) != 9:
+        raise ValueError(f"YOLOv3 uses nine anchors, got {len(pairs)}")
+    return pairs
+
+
 class ScaleSpec:
     """Anchor mask for one YOLO head. Not a module; it has no parameters."""
 
-    def __init__(self, mask: tuple[int, ...], scale_index: int, name: str) -> None:
+    def __init__(self, mask: tuple[int, ...], scale_index: int, name: str, anchors=None) -> None:
         self.mask = tuple(mask)
-        self.anchors = ANCHORS
+        self.anchors = normalize_anchors(anchors)
         self.scale_index = scale_index
         self.name = name
 
@@ -141,14 +150,17 @@ class YOLOv3(nn.Module):
 
     `forward` returns raw prediction tensors, one per scale, in large,
     medium, small order. Channels are `3 * (5 + num_classes)`: the box
-    offsets, objectness logit, and independent class logits.
+    offsets, objectness logit, and independent class logits. `anchors` are
+    either the nine published COCO clusters or a fresh k-means fit on the
+    training labels. They are not learned parameters.
     """
 
-    def __init__(self, num_classes: int = 80) -> None:
+    def __init__(self, num_classes: int = 80, anchors=None) -> None:
         super().__init__()
         if num_classes < 1:
             raise ValueError("num_classes must be positive")
         self.num_classes = num_classes
+        self.anchors = normalize_anchors(anchors)
         self.backbone = Darknet53()
         out_channels = 3 * (5 + num_classes)
 
@@ -173,7 +185,7 @@ class YOLOv3(nn.Module):
         )
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
         self.yolo_layers = [
-            ScaleSpec(mask, index, name)
+            ScaleSpec(mask, index, name, self.anchors)
             for index, (mask, name) in enumerate(zip(ANCHOR_MASKS, SCALE_NAMES))
         ]
         self._init_weights()

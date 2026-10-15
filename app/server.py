@@ -28,29 +28,58 @@ STATIC = Path(__file__).resolve().parent / "static"
 SAMPLES = ROOT / "samples"
 WEIGHTS_PATH = ROOT / "weights" / "yolov3.weights"
 
-state: dict = {"detector": None, "error": None}
+state: dict = {"detector": None, "error": None, "active": None, "catalog": []}
 lock = threading.Lock()
 
+NO_WEIGHTS = (
+    "No checkpoint yet. Train this reimplementation with "
+    "`python -m yolov3.train --data samples/synthetic/dataset.yaml --anchors kmeans --burn-in 0`, "
+    "or download the Darknet COCO file to check that the same network reads those weights."
+)
 
-def find_weights() -> Path | None:
-    candidates = [
-        os.environ.get("YOLOV3_WEIGHTS"),
-        WEIGHTS_PATH,
-        ROOT / "weights" / "yolov3.pt",
+
+def weight_catalog() -> list[dict]:
+    """Weight files the reimplemented network can run. None of these are a library model."""
+    specs = [
+        (ROOT / "runs" / "shapes" / "best.pt", "shapes", "Trained here on the shape plates", "trained"),
+        (WEIGHTS_PATH, "coco", "Darknet file, COCO classes", "darknet"),
+        (ROOT / "weights" / "yolov3.pt", "coco-pt", "Checkpoint, COCO classes", "checkpoint"),
     ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return Path(candidate)
-    return None
+    found = []
+    seen = set()
+    for path, weight_id, label, kind in specs:
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        found.append({"id": weight_id, "path": path, "label": label, "kind": kind})
+    return found
 
 
-def try_load() -> None:
-    path = find_weights()
-    if path is None:
+def try_load(weight_id: str | None = None) -> None:
+    catalog = weight_catalog()
+    state["catalog"] = catalog
+    if not catalog:
         state["detector"] = None
-        state["error"] = "Weights are not on disk yet."
+        state["active"] = None
+        state["error"] = NO_WEIGHTS
         return
-    state["detector"] = Detector(path)
+    chosen = None
+    if weight_id:
+        chosen = next((item for item in catalog if item["id"] == weight_id), None)
+        if chosen is None:
+            raise FileNotFoundError(weight_id)
+    if chosen is None:
+        env = os.environ.get("YOLOV3_WEIGHTS")
+        if env:
+            env_path = Path(env).resolve()
+            chosen = next((item for item in catalog if item["path"].resolve() == env_path), None)
+    if chosen is None:
+        chosen = next((item for item in catalog if item["id"] == "coco"), catalog[0])
+    state["detector"] = Detector(chosen["path"])
+    state["active"] = chosen["id"]
     state["error"] = None
 
 
@@ -144,19 +173,52 @@ def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
+def _catalog_payload() -> list[dict]:
+    return [
+        {
+            "id": item["id"],
+            "label": item["label"],
+            "kind": item["kind"],
+            "active": item["id"] == state["active"],
+        }
+        for item in state["catalog"]
+    ]
+
+
 @app.get("/api/health")
 def health() -> dict:
     detector = state["detector"]
-    if detector is None:
-        return {"ready": False, "error": state["error"], "classes": []}
-    return {
-        "ready": True,
-        "weights": str(detector.weights_path),
-        "device": str(detector.device),
-        "parameters": detector.parameter_count,
-        "classes": detector.class_names,
+    payload = {
+        "ready": detector is not None,
+        "error": state["error"],
+        "available": _catalog_payload(),
+        "classes": [],
         "img_sizes": list(MULTI_SCALE_SIZES),
     }
+    if detector is None:
+        return payload
+    payload.update(
+        {
+            "weights": str(detector.weights_path),
+            "origin": detector.origin,
+            "device": str(detector.device),
+            "parameters": detector.parameter_count,
+            "classes": detector.class_names,
+        }
+    )
+    return payload
+
+
+@app.post("/api/weights/select")
+def select_weights(weight_id: str = Form(...)) -> dict:
+    try:
+        with lock:
+            try_load(weight_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown weight set {exc}") from exc
+    if state["detector"] is None:
+        raise HTTPException(status_code=409, detail=state["error"] or NO_WEIGHTS)
+    return health()
 
 
 @app.get("/api/samples")

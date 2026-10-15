@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from yolov3.anchors import anchors_from_labels, mean_best_iou, normalized_wh_from_labels
 from yolov3.config import (
     ANCHOR_MASKS,
     ANCHORS,
@@ -77,7 +78,7 @@ def build_datasets(args):
     if args.data:
         spec = load_dataset_yaml(args.data)
         names = spec["names"]
-        train_set = YOLODataset(spec["root"], spec["train"], "labels", args.img_size, augment=True)
+        train_set = YOLODataset(spec["root"], spec["train"], "labels", args.img_size, augment=not args.no_augment)
         val_set = YOLODataset(spec["root"], spec["val"], "labels", args.img_size, augment=False)
         return train_set, val_set, names
     if args.coco_train:
@@ -89,7 +90,7 @@ def build_datasets(args):
     raise SystemExit("Pass --data dataset.yaml or the COCO image and annotation paths")
 
 
-def run_epoch(model, loader, criterion, optimizer, device, img_size, multi_scale, burn_in, base_lr, global_step):
+def run_epoch(model, loader, criterion, optimizer, device, img_size, multi_scale, burn_in, base_lr, global_step, grad_clip):
     model.train()
     total = 0.0
     seen = 0
@@ -109,13 +110,15 @@ def run_epoch(model, loader, criterion, optimizer, device, img_size, multi_scale
         predictions = model(images)
         loss = criterion(predictions, targets, current_size)
         loss.backward()
+        if grad_clip and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
         total += float(loss.detach()) * images.shape[0]
         seen += images.shape[0]
         if batch_index % 20 == 0:
             parts = criterion.last_parts
             print(
-                f"  batch {batch_index:04d}  loss {float(loss):.4f}  "
+                f"  batch {batch_index:04d}  loss {float(loss.detach()):.4f}  "
                 f"xy {parts['xy']:.3f} wh {parts['wh']:.3f} obj {parts['obj']:.3f} cls {parts['cls']:.3f}  "
                 f"lr {lr:.6f}  size {current_size}",
                 flush=True,
@@ -136,7 +139,7 @@ def evaluate(model, loader, criterion, device, img_size, conf_thresh=0.25, iou_t
         targets = targets.to(device)
         predictions = model(images)
         loss = criterion(predictions, targets, img_size)
-        total += float(loss) * images.shape[0]
+        total += float(loss.detach()) * images.shape[0]
         seen += images.shape[0]
         decoded = decode_predictions(predictions, model.yolo_layers, img_size)
         detections = non_max_suppression(decoded, conf_thresh, iou_thresh)
@@ -197,6 +200,7 @@ def save_checkpoint(path: Path, model, optimizer, epoch: int, class_names, img_s
             "epoch": epoch,
             "class_names": list(class_names) if class_names is not None else None,
             "num_classes": model.num_classes,
+            "anchors": [list(pair) for pair in model.anchors],
             "img_size": img_size,
             "metrics": metrics,
         },
@@ -204,25 +208,55 @@ def save_checkpoint(path: Path, model, optimizer, epoch: int, class_names, img_s
     )
 
 
+def resolve_anchors(args, img_size: int):
+    """Pick priors. A Darknet COCO file implies the published clusters.
+
+    Training from scratch on a YOLO label directory clusters those boxes with
+    the IoU k-means unless `--anchors coco` is set.
+    """
+    weights = str(args.weights or "")
+    if weights.endswith(".weights"):
+        if args.anchors == "kmeans":
+            raise SystemExit("A Darknet COCO weight file uses the published anchors, not a new clustering")
+        return ANCHORS
+    if args.anchors == "coco" or (args.coco_train and args.anchors != "kmeans"):
+        return ANCHORS
+    if not args.data:
+        if args.anchors == "kmeans":
+            raise SystemExit("k-means anchors need --data pointing at a YOLO label set")
+        return ANCHORS
+    spec = load_dataset_yaml(args.data)
+    label_dir = spec["root"] / "labels"
+    anchors = anchors_from_labels(label_dir, img_size, k=9)
+    wh = normalized_wh_from_labels(label_dir) * float(img_size)
+    print(
+        f"k-means anchors at {img_size}px, mean best IoU {mean_best_iou(wh, anchors):.3f}: {anchors}",
+        flush=True,
+    )
+    return anchors
+
+
 def train(args) -> None:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     train_set, val_set, class_names = build_datasets(args)
     num_classes = len(class_names) if class_names else 80
-    model = YOLOv3(num_classes=num_classes).to(device)
+    anchors = resolve_anchors(args, args.img_size)
+    model = YOLOv3(num_classes=num_classes, anchors=anchors).to(device)
     if args.weights:
         from yolov3.weights import load_model_weights
 
         load_model_weights(model, args.weights)
-    criterion = YOLOv3Loss(num_classes, ANCHORS, ANCHOR_MASKS, ignore_thresh=args.ignore_thresh)
-    optimizer = torch.optim.SGD(
-        sgd_param_groups(model, args.weight_decay),
-        lr=args.lr,
-        momentum=args.momentum,
-    )
+    criterion = YOLOv3Loss(num_classes, model.anchors, ANCHOR_MASKS, ignore_thresh=args.ignore_thresh)
+    groups = sgd_param_groups(model, args.weight_decay if args.optimizer == "sgd" else 0.0)
+    if args.optimizer == "adam":
+        optimizer = torch.optim.Adam(groups, lr=args.lr)
+    else:
+        optimizer = torch.optim.SGD(groups, lr=args.lr, momentum=args.momentum)
     train_loader = make_loader(train_set, args.batch_size, True, args.workers)
     val_loader = make_loader(val_set, args.batch_size, False, args.workers)
     save_dir = Path(args.save_dir)
-    best = float("inf")
+    best_loss = float("inf")
+    best_recall = -1.0
     global_step = 0
     for epoch in range(1, args.epochs + 1):
         print(f"Epoch {epoch}/{args.epochs}", flush=True)
@@ -237,6 +271,7 @@ def train(args) -> None:
             args.burn_in,
             args.lr,
             global_step,
+            args.grad_clip,
         )
         metrics = evaluate(model, val_loader, criterion, device, args.img_size)
         metrics["train_loss"] = train_loss
@@ -246,8 +281,12 @@ def train(args) -> None:
             flush=True,
         )
         save_checkpoint(save_dir / "last.pt", model, optimizer, epoch, class_names, args.img_size, metrics)
-        if metrics["loss"] < best:
-            best = metrics["loss"]
+        recall = metrics["recall"]
+        loss_value = metrics["loss"]
+        improved = recall > best_recall or (recall == best_recall and loss_value < best_loss)
+        if improved and loss_value == loss_value:
+            best_recall = recall
+            best_loss = loss_value
             save_checkpoint(save_dir / "best.pt", model, optimizer, epoch, class_names, args.img_size, metrics)
 
 
@@ -259,15 +298,24 @@ def parse_args(argv=None):
     parser.add_argument("--coco-val", help="COCO val image directory")
     parser.add_argument("--coco-val-ann", help="COCO instances_val JSON")
     parser.add_argument("--weights", help="Optional Darknet .weights or checkpoint to fine-tune")
+    parser.add_argument(
+        "--anchors",
+        choices=("kmeans", "coco"),
+        default=None,
+        help="kmeans clusters the training labels; coco uses the nine published priors",
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--img-size", type=int, default=416)
+    parser.add_argument("--optimizer", choices=("sgd", "adam"), default="sgd")
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--momentum", type=float, default=MOMENTUM)
     parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY)
     parser.add_argument("--burn-in", type=int, default=BURN_IN)
     parser.add_argument("--ignore-thresh", type=float, default=IGNORE_THRESH)
     parser.add_argument("--multi-scale", action="store_true")
+    parser.add_argument("--no-augment", action="store_true", help="Skip flip, jitter, and color shifts")
+    parser.add_argument("--grad-clip", type=float, default=0.0, help="Clip the global gradient norm. 0 disables it")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--device", default=None)
     parser.add_argument("--save-dir", default="runs/train")
