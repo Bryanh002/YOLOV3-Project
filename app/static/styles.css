@@ -78,6 +78,8 @@ h2 {
   background: #2a2118;
 }
 
+.banner[hidden] { display: none !important; }
+
 .banner p { margin: 0; }
 
 .banner button, .upload {
@@ -87,6 +89,20 @@ h2 {
   padding: 8px 12px;
   cursor: pointer;
   font-weight: 640;
+}
+
+.upload { position: relative; }
+
+.upload input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 main {
@@ -160,20 +176,15 @@ main {
   position: relative;
   width: fit-content;
   max-width: 100%;
-  background:
-    linear-gradient(45deg, #1a1f1c 25%, transparent 25%),
-    linear-gradient(-45deg, #1a1f1c 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #1a1f1c 75%),
-    linear-gradient(-45deg, transparent 75%, #1a1f1c 75%);
-  background-size: 24px 24px;
-  background-color: #151a17;
+  line-height: 0;
   box-shadow: var(--shadow);
 }
 
 .frame img {
   display: block;
   max-width: min(100%, 920px);
-  max-height: calc(100vh - 190px);
+  max-height: calc(100vh - 210px);
+  width: auto;
   height: auto;
 }
 
@@ -182,7 +193,6 @@ main {
   inset: 0;
   width: 100%;
   height: 100%;
-  overflow: visible;
 }
 
 .empty, .working {
@@ -292,5 +302,6 @@ svg .hot-shape { stroke-width: 4.5; }
   main { grid-template-columns: 1fr; }
   .strip { flex-direction: row; max-height: none; overflow-x: auto; }
   .strip button { min-width: 180px; }
-  .frame img { max-height: 70vh; }
+  .frame img { max-height: 48vh; }
+  .stage { justify-content: flex-start; }
 }
