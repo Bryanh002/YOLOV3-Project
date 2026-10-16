@@ -15,6 +15,7 @@ const iouInput = document.querySelector("#iou");
 const confValue = document.querySelector("#conf-value");
 const iouValue = document.querySelector("#iou-value");
 const sizeInput = document.querySelector("#imgsz");
+const weightsInput = document.querySelector("#weights");
 const showLabels = document.querySelector("#show-labels");
 const fileInput = document.querySelector("#file");
 
@@ -36,18 +37,40 @@ function svg(name, attrs) {
   return node;
 }
 
+let fillingWeights = false;
+
+function fillWeights(available) {
+  fillingWeights = true;
+  weightsInput.replaceChildren();
+  for (const item of available || []) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.label;
+    option.selected = item.active;
+    weightsInput.appendChild(option);
+  }
+  if (!available || !available.length) {
+    const option = document.createElement("option");
+    option.textContent = "None loaded";
+    weightsInput.appendChild(option);
+  }
+  fillingWeights = false;
+}
+
 async function refreshHealth() {
   const response = await fetch("/api/health");
   const body = await response.json();
   state.ready = body.ready;
+  fillWeights(body.available);
   if (body.ready) {
     const millions = (body.parameters / 1e6).toFixed(1);
-    statusEl.textContent = `${millions}M parameters · ${body.device} · ${body.classes.length} classes`;
+    const source = body.origin === "trained" ? "trained here" : "Darknet file";
+    statusEl.textContent = `${millions}M parameters · ${body.device} · ${source} · ${body.classes.length} classes`;
     banner.hidden = true;
   } else {
-    statusEl.textContent = "Detector is waiting for weights";
+    statusEl.textContent = "The reimplementation has no weights loaded";
     banner.hidden = false;
-    bannerText.textContent = body.error || "Official weights are not loaded.";
+    bannerText.textContent = body.error || "Train this reimplementation, or load a Darknet weight file to compare.";
   }
 }
 
@@ -304,6 +327,24 @@ function scheduleDetection() {
 confInput.addEventListener("input", scheduleDetection);
 iouInput.addEventListener("input", scheduleDetection);
 sizeInput.addEventListener("change", runDetection);
+weightsInput.addEventListener("change", async () => {
+  if (fillingWeights || !weightsInput.value) return;
+  const form = new FormData();
+  form.set("weight_id", weightsInput.value);
+  working.hidden = false;
+  try {
+    const response = await fetch("/api/weights/select", { method: "POST", body: form });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || "Could not switch weights");
+    await refreshHealth();
+    runDetection();
+  } catch (error) {
+    countEl.textContent = "Could not switch weights";
+    countEl.classList.add("error");
+    timing.textContent = error.message;
+    working.hidden = true;
+  }
+});
 showLabels.addEventListener("change", draw);
 
 document.querySelectorAll("#scales button").forEach((button) => {

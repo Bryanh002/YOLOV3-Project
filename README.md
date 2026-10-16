@@ -1,10 +1,16 @@
 # YOLOv3
 
-A from-scratch YOLOv3 detector: Darknet-53, three prediction scales, the paper's
-box parameterization, and a browser workbench for running it on sample images.
+A re-implementation of YOLOv3. Detection does not call a pretrained detector
+or a detection library. Darknet-53, the three-scale head, anchor assignment,
+the loss, k-means priors, and class-wise NMS are all in this repository.
+PyTorch supplies convolution and batch norm only.
 
 The original notebooks in `legacy/` used a ResNet backbone, a single detection
 head, and a loss that did not assign anchors. This package replaces that.
+
+A Darknet `yolov3.weights` file is optional. It is the same tensor layout, so
+it can be loaded to compare against the COCO-trained reference. It is not the
+implementation. Training from scratch clusters whatever labels you give it.
 
 ## Model
 
@@ -25,9 +31,14 @@ bh = ph · exp(th)
 ```
 
 Class scores are independent logistics, not a softmax. The layer order matches
-`yolov3/cfg/yolov3.cfg`, including the YOLO layers at 82, 94, and 106, so the
-official Darknet weight file loads directly. Input pixels are divided by 255.
-There is no ImageNet mean or standard deviation.
+`yolov3/cfg/yolov3.cfg`, including the YOLO layers at 82, 94, and 106, which is
+why a Darknet weight file can be read without a second architecture. Input
+pixels are divided by 255. There is no ImageNet mean or standard deviation.
+
+Priors come from k-means on the training boxes. The distance is `1 - IoU`
+with both boxes centered at the origin, which is the clustering YOLOv3
+inherited from YOLOv2. `--anchors coco` keeps the nine published COCO clusters
+instead, which is what a Darknet COCO weight file expects.
 
 ## Loss and training
 
@@ -39,12 +50,13 @@ equations. Center offsets use squared error after the sigmoid, width and height
 use squared error in log space, and objectness and classes use binary
 cross-entropy. Boxes are weighted by `(2 - w·h)` so small objects count more.
 
-The training loop uses SGD with momentum 0.9, weight decay `5e-4` on
-convolution kernels only, the burn-in curve `lr * (step / burn_in)^4`, and the
-step drops at batches 400000 and 450000. `--multi-scale` resizes every tenth
-batch to a multiple of 32 between 320 and 608. Augmentation is a horizontal
-flip, aspect jitter, and the hue, saturation, and exposure shifts from the
-config.
+The training loop defaults to the paper's SGD: momentum 0.9, weight decay
+`5e-4` on convolution kernels only, the burn-in curve `lr * (step / burn_in)^4`,
+and the step drops at batches 400000 and 450000. `--optimizer adam` is there
+for a small labeled set, where the summed objectness term otherwise needs a
+long SGD run. `--multi-scale` resizes every tenth batch to a multiple of 32
+between 320 and 608. Augmentation is a horizontal flip, aspect jitter, and the
+hue, saturation, and exposure shifts from the config.
 
 ## Setup
 
@@ -75,9 +87,14 @@ If the weights are missing, the page can download them.
 ## Detect and train
 
 ```bash
+python -m yolov3.train --data samples/synthetic/dataset.yaml --optimizer adam --epochs 40 --batch-size 4 --img-size 320 --burn-in 0 --lr 0.001 --grad-clip 10 --no-augment --workers 0 --save-dir runs/shapes
+python -m yolov3.detect --weights runs/shapes/best.pt --source samples/synthetic/images --img-size 320
 python -m yolov3.detect --weights weights/yolov3.weights --source samples/photos --img-size 416
-python -m yolov3.train --data samples/synthetic/dataset.yaml --epochs 20 --batch-size 4 --img-size 416 --burn-in 0
 ```
+
+The first command fits the nine priors to the shape labels, then trains the
+loss from random initialization. The workbench lists that checkpoint separately
+from a Darknet COCO file when both are on disk.
 
 COCO training takes image directories plus `instances_*.json`:
 

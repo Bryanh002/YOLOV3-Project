@@ -22,8 +22,8 @@
   </header>
 
   <div id="banner" class="banner" hidden>
-    <p id="banner-text">Official weights are not loaded, so the bench cannot draw detections yet.</p>
-    <button id="download" type="button">Download yolov3.weights</button>
+    <p id="banner-text">Train this reimplementation, or load a Darknet weight file to compare.</p>
+    <button id="download" type="button">Load COCO Darknet file</button>
   </div>
 
   <main>
@@ -50,6 +50,10 @@
 
     <aside class="inspector">
       <h2>Exposure</h2>
+      <label class="slider">
+        <span>Weights</span>
+        <select id="weights"></select>
+      </label>
       <label class="slider">
         <span>Confidence <b id="conf-value">0.25</b></span>
         <input id="conf" type="range" min="0.05" max="0.9" step="0.01" value="0.25">

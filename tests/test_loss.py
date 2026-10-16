@@ -5,7 +5,7 @@ import torch
 from yolov3.config import ANCHOR_MASKS, ANCHORS
 from yolov3.loss import YOLOv3Loss
 from yolov3.model import YOLOv3
-from yolov3.ops import wh_iou
+from yolov3.ops import box_iou, decode_predictions, non_max_suppression, wh_iou, xywh_to_xyxy
 
 
 def _predictions(batch=1, num_classes=80, size=416):
@@ -52,6 +52,40 @@ def test_empty_targets_still_backpropagate():
     loss.backward()
     assert torch.isfinite(loss)
     assert any(tensor.grad is not None and torch.isfinite(tensor.grad).all() for tensor in predictions)
+
+
+def test_training_moves_a_box_onto_the_object_without_external_weights():
+    """The loss, decoder, and NMS are enough to localize a box from random init."""
+    torch.manual_seed(0)
+    model = YOLOv3(num_classes=1)
+    criterion = YOLOv3Loss(1, model.anchors, ANCHOR_MASKS, ignore_thresh=0.7)
+    optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
+    image = torch.rand(1, 3, 128, 128)
+    target = torch.tensor([[0.0, 0.0, 0.5, 0.5, 0.5, 0.5]])
+    ground_truth = xywh_to_xyxy(target[:, 2:6] * 128)
+
+    def best_overlap() -> float:
+        model.eval()
+        with torch.no_grad():
+            decoded = decode_predictions(model(image), model.yolo_layers, 128)
+            kept = non_max_suppression(decoded, conf_thresh=0.05, iou_thresh=0.5)[0]
+        model.train()
+        if kept.numel() == 0:
+            return 0.0
+        same_class = kept[kept[:, 5] == 0]
+        if same_class.numel() == 0:
+            return 0.0
+        return float(box_iou(same_class[:, :4], ground_truth).max())
+
+    before = best_overlap()
+    model.train()
+    for _ in range(40):
+        optimizer.zero_grad(set_to_none=True)
+        loss = criterion(model(image), target, 128)
+        loss.backward()
+        optimizer.step()
+    after = best_overlap()
+    assert after > 0.5, (before, after)
 
 
 def test_box_loss_falls_when_one_example_is_overfit():
