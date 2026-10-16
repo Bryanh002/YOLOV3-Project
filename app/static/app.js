@@ -97,6 +97,10 @@ function showImage(url, name) {
   photo.hidden = false;
   overlay.hidden = false;
   photo.alt = name;
+  photo.onload = () => {
+    fitFrame();
+    draw();
+  };
   photo.src = url;
   caption.textContent = name;
   state.result = null;
@@ -108,14 +112,47 @@ function visibleDetections() {
   return state.result.detections.filter((det) => state.scale === "all" || det.scale === state.scale);
 }
 
+function boxesOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function placeLabel(det, labelWidth, labelHeight, width, height, placed) {
+  let x = Math.max(0, Math.min(det.x1, width - labelWidth));
+  let y = det.y1 - labelHeight;
+  if (y < 0) y = Math.min(det.y1, Math.max(0, height - labelHeight));
+  const candidate = { x, y, w: labelWidth, h: labelHeight };
+  for (let guard = 0; guard < 6 && placed.some((box) => boxesOverlap(candidate, box)); guard += 1) {
+    candidate.y += labelHeight + 2;
+    if (candidate.y + labelHeight > height) {
+      candidate.y = Math.max(0, det.y1);
+      candidate.x = Math.max(0, Math.min(width - labelWidth, candidate.x + labelWidth * 0.35));
+    }
+  }
+  placed.push({ ...candidate });
+  return candidate;
+}
+
+function fitFrame() {
+  if (photo.hidden || !photo.complete) return;
+  frame.style.width = "";
+  frame.style.height = "";
+  const width = photo.clientWidth;
+  const height = photo.clientHeight;
+  if (!width || !height) return;
+  frame.style.width = `${width}px`;
+  frame.style.height = `${height}px`;
+}
+
 function draw() {
   overlay.replaceChildren();
+  fitFrame();
   const result = state.result;
   if (!result) return;
   const width = result.image.width;
   const height = result.image.height;
   overlay.setAttribute("viewBox", `0 0 ${width} ${height}`);
   const font = Math.max(14, width / 42);
+  const placed = [];
 
   if (showLabels.checked) {
     for (const label of result.labels) {
@@ -143,20 +180,19 @@ function draw() {
       stroke: det.color,
     });
     const text = `${det.class_name} ${det.confidence.toFixed(2)}`;
-    const labelWidth = text.length * font * 0.56 + font * 0.8;
+    const labelWidth = Math.min(width, text.length * font * 0.56 + font * 0.8);
     const labelHeight = font * 1.35;
-    let labelY = det.y1 - labelHeight;
-    if (labelY < 0) labelY = det.y1;
+    const spot = placeLabel(det, labelWidth, labelHeight, width, height, placed);
     const plate = svg("rect", {
-      x: det.x1,
-      y: labelY,
+      x: spot.x,
+      y: spot.y,
       width: labelWidth,
       height: labelHeight,
       fill: det.color,
     });
     const type = svg("text", {
-      x: det.x1 + font * 0.35,
-      y: labelY + font,
+      x: spot.x + font * 0.35,
+      y: spot.y + font,
       class: "tag",
       fill: "#1a2010",
       "font-size": font,
@@ -304,6 +340,8 @@ document.querySelector("#download").addEventListener("click", async () => {
     button.disabled = false;
   }
 });
+
+window.addEventListener("resize", fitFrame);
 
 document.addEventListener("keydown", (event) => {
   if (!state.samples.length || state.upload) return;
