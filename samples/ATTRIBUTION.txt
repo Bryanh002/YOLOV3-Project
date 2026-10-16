@@ -1,0 +1,15 @@
+Photographs in samples/photos were made for this workbench, except the two
+Wikimedia Commons files below. Synthetic scenes in samples/synthetic are drawn
+by scripts/generate_samples.py and carry YOLO labels for disc, tile, and wedge.
+
+samples/photos/yellow_labrador.jpg
+  Wikimedia Commons file YellowLabradorLooking_new.jpg
+  https://commons.wikimedia.org/wiki/File:YellowLabradorLooking_new.jpg
+
+samples/photos/nokota_horses.jpg
+  Wikimedia Commons file Nokota_Horses_cropped.jpg
+  https://commons.wikimedia.org/wiki/File:Nokota_Horses_cropped.jpg
+
+park_dog.jpg, city_traffic.jpg, rider_bicycle.jpg, sofa_cat.jpg,
+kitchen_table.jpg, and sidewalk_people.jpg are original images for exercising
+the viewer. They are not from the COCO training set.
